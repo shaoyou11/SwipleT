@@ -20,6 +20,7 @@ extern const NSTimeInterval SWScreenFirstFrameLimit;
 - (void)removeListener:(NSInteger)identifier;
 - (void)onPackets:(NSData *)batch;
 - (void)onEnd:(NSString *)failure;
+- (NSString *)diagnosticSummary;
 @end
 
 SWFrame *SWScreenFirstFrame(SWScreenFeed *feed, SWCancelToken *token, NSInteger *sequence, NSError **error);

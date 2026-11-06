@@ -32,7 +32,12 @@ type Stream struct {
 	keyFrameTimer  *time.Timer
 	firSequence    uint8
 
-	lastRTCP atomic.Int64
+	lastRTCP           atomic.Int64
+	diagnosticReceived atomic.Uint64
+	diagnosticFiltered atomic.Uint64
+	diagnosticRTP      atomic.Uint64
+	diagnosticRTCP     atomic.Uint64
+	diagnosticBytes    atomic.Uint64
 
 	done      chan struct{}
 	endOnce   sync.Once
@@ -56,6 +61,7 @@ func newStream(client *Client, info StreamInfo, conn *tunnel.UDPConn, control *x
 	}
 	stream.lastRTCP.Store(time.Now().UnixNano())
 	go stream.watchControl()
+	go stream.logDiagnosticCounters()
 	go func() {
 		var err error
 		select {
@@ -74,6 +80,24 @@ func newStream(client *Client, info StreamInfo, conn *tunnel.UDPConn, control *x
 
 func (s *Stream) Info() StreamInfo {
 	return s.info
+}
+
+// Aggregate metadata only; never log packet payloads or peer addresses.
+func (s *Stream) logDiagnosticCounters() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for report := 0; report < 5; report++ {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.client.logger.Debug("video-diag SSRC ", s.info.SSRC,
+				" received=", s.diagnosticReceived.Load(),
+				" source_filtered=", s.diagnosticFiltered.Load(),
+				" rtp=", s.diagnosticRTP.Load(), " rtcp=", s.diagnosticRTCP.Load(),
+				" bytes=", s.diagnosticBytes.Load())
+		}
+	}
 }
 
 func (s *Stream) watchControl() {
@@ -141,11 +165,19 @@ func (s *Stream) ReadPackets(ctx context.Context, packets []Packet) (int, error)
 		}
 		count := 0
 		for _, datagram := range s.datagrams[:n] {
+			s.diagnosticReceived.Add(1)
+			s.diagnosticBytes.Add(uint64(datagram.Buffer.Len()))
 			if datagram.Source.Addr() != s.deviceIP {
+				s.diagnosticFiltered.Add(1)
 				datagram.Buffer.Release()
 				continue
 			}
 			packets[count] = Packet{Buffer: datagram.Buffer, RTCP: isRTCP(datagram.Buffer.Bytes()), Arrival: datagram.Arrived}
+			if packets[count].RTCP {
+				s.diagnosticRTCP.Add(1)
+			} else {
+				s.diagnosticRTP.Add(1)
+			}
 			count++
 		}
 		if count > 0 {

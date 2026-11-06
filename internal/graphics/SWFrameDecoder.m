@@ -15,6 +15,7 @@
     VTDecompressionSessionRef _session;
     BOOL _waitingForKeyframe;
     atomic_bool _failed;
+    atomic_bool _reportedDecodeError;
     atomic_int _failedStatus;
     OSStatus _reportedStatus;
     SWRTPClock *_clock;
@@ -130,6 +131,9 @@
                     return;
                 }
                 if (decoded != noErr || image == NULL) {
+                    if (!atomic_exchange(&decoder->_reportedDecodeError, true)) {
+                        SWLogError([NSString stringWithFormat:@"video-diag decode callback OSStatus=%d flags=%u image_present=%d", (int)decoded, (unsigned int)flags, image != NULL]);
+                    }
                     atomic_store(&decoder->_failedStatus, decoded);
                     atomic_store(&decoder->_failed, true);
                     return;
@@ -139,6 +143,9 @@
         });
     CFRelease(sample);
     if (status != noErr) {
+        if (!atomic_exchange(&_reportedDecodeError, true)) {
+            SWLogError([NSString stringWithFormat:@"video-diag decode submission OSStatus=%d", (int)status]);
+        }
         [self reportStatus:status];
         [self invalidate];
         return YES;

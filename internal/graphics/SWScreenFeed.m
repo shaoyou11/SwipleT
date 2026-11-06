@@ -30,6 +30,7 @@ static const NSInteger SWPacketHeaderSize = 13;
     NSInteger _nextListener;
     SWDepacketizer *_depacketizer;
     SWFrameDecoder *_decoder;
+    NSUInteger _diagBatches, _diagRTP, _diagRTCP, _diagUnits, _diagDamaged, _diagKeyframes, _diagRetries, _diagDecoded;
 }
 
 + (SWScreenFeed *)shared {
@@ -95,6 +96,7 @@ static const NSInteger SWPacketHeaderSize = 13;
     _failure = nil;
     _latest = nil;
     *geometry = _geometry;
+    _diagBatches = _diagRTP = _diagRTCP = _diagUnits = _diagDamaged = _diagKeyframes = _diagRetries = _diagDecoded = 0;
     [_state unlock];
     return YES;
 }
@@ -220,6 +222,7 @@ static const NSInteger SWPacketHeaderSize = 13;
     const uint8_t *bytes = batch.bytes;
     NSInteger total = (NSInteger)batch.length;
     NSInteger offset = 0;
+    NSUInteger rtpCount = 0, rtcpCount = 0, damaged = 0, keyframes = 0, retries = 0;
     while (offset + SWPacketHeaderSize <= total) {
         uint64_t arrival = 0;
         for (NSInteger index = 0; index < 8; index++) {
@@ -235,18 +238,43 @@ static const NSInteger SWPacketHeaderSize = 13;
             break;
         }
         if (!rtcp) {
+            rtpCount++;
             [_depacketizer push:bytes + offset length:length arrival:(double)arrival / 1e6 into:units];
+        } else {
+            rtcpCount++;
         }
         offset += length;
     }
     for (SWAccessUnit *unit in units) {
+        damaged += unit.damaged ? 1 : 0;
+        keyframes += unit.isKeyframe ? 1 : 0;
         for (void (^listener)(SWAccessUnit *) in listeners) {
             listener(unit);
         }
         if ([_decoder decode:unit]) {
+            retries++;
             [self requestKeyFrame];
         }
     }
+    [_state lock];
+    _diagBatches++;
+    _diagRTP += rtpCount;
+    _diagRTCP += rtcpCount;
+    _diagUnits += units.count;
+    _diagDamaged += damaged;
+    _diagKeyframes += keyframes;
+    _diagRetries += retries;
+    [_state unlock];
+}
+
+- (NSString *)diagnosticSummary {
+    [_state lock];
+    NSString *summary = [NSString stringWithFormat:@"video-diag batches=%lu rtp=%lu rtcp=%lu units=%lu damaged=%lu keyframes=%lu keyframe_requests=%lu decoded=%lu",
+        (unsigned long)_diagBatches, (unsigned long)_diagRTP, (unsigned long)_diagRTCP,
+        (unsigned long)_diagUnits, (unsigned long)_diagDamaged, (unsigned long)_diagKeyframes,
+        (unsigned long)_diagRetries, (unsigned long)_diagDecoded];
+    [_state unlock];
+    return summary;
 }
 
 - (void)decoded:(CVPixelBufferRef)image unit:(SWAccessUnit *)unit {
@@ -258,6 +286,7 @@ static const NSInteger SWPacketHeaderSize = 13;
     SWFrame *frame = [[SWFrame alloc] initWithPixelBuffer:image time:unit.arrival turns:unit.turns geometry:_geometry];
     _latest = frame;
     _sequence += 1;
+    _diagDecoded++;
     [_state broadcast];
     NSArray<void (^)(SWFrame *)> *listeners = _frameListeners.allValues;
     [_state unlock];
@@ -281,6 +310,7 @@ SWFrame *SWScreenFirstFrame(SWScreenFeed *feed, SWCancelToken *token, NSInteger 
     if (failure != nil) {
         SWFailWith(error, failure);
     } else {
+        SWLogError([feed diagnosticSummary]);
         SWFail(error, SWErrorNameUnavailable, @"graphics: the screen sent no frame within %ld s; it may be off", (long)SWScreenFirstFrameLimit);
     }
     return nil;
